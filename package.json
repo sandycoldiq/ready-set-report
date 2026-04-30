@@ -1,0 +1,18 @@
+{
+  "name": "ready-set-weekly-report",
+  "version": "1.0.0",
+  "description": "Weekly GTM outbound report for Ready Set — pulls from Instantly + Lemlist, posts to Slack",
+  "main": "ready_set_weekly_report.js",
+  "scripts": {
+    "start": "node report_server.js"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.91.1",
+    "@slack/bolt": "^4.7.1",
+    "@slack/web-api": "^7.3.0",
+    "node-cron": "^4.2.1"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
