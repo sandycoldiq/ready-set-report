@@ -223,14 +223,15 @@ function buildReportBlocks(instantlyGroups, lemlistGroups, weekStart, weekEnd, i
     }
 
     if (instantlyGroups.length > 1) {
-      const tot = instantlyGroups.reduce((a, g) => ({ newLeads: a.newLeads + g.newLeads, emailsSent: a.emailsSent + g.emailsSent, replies: a.replies + g.replies, ooo: a.ooo + g.ooo }), { newLeads: 0, emailsSent: 0, replies: 0, ooo: 0 });
+      const tot = instantlyGroups.reduce((a, g) => ({ newLeads: a.newLeads + g.newLeads, emailsSent: a.emailsSent + g.emailsSent, replies: a.replies + g.replies, ooo: a.ooo + g.ooo, interested: a.interested + g.interested }), { newLeads: 0, emailsSent: 0, replies: 0, ooo: 0, interested: 0 });
       blocks.push({ type: 'divider' });
       blocks.push(txt('*📊 Email Totals*'));
       blocks.push(statsTable([
-        ['Unique people contacted', n(tot.newLeads)],
-        ['Total emails sent',       n(tot.emailsSent)],
-        ['Replies',                 n(tot.replies)],
-        ['Auto replies',            n(tot.ooo)],
+        ['Unique people contacted',   n(tot.newLeads)],
+        ['Total emails sent',         n(tot.emailsSent)],
+        ['Replies',                   n(tot.replies)],
+        ['Auto replies',              n(tot.ooo)],
+        ['Interested / hand-raisers', tot.interested > 0 ? n(tot.interested) : '—'],
       ]));
     }
   }
