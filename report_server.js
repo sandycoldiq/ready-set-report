@@ -346,6 +346,21 @@ Return ONLY the modified JSON array. No explanation, no markdown fences, no extr
 }
 
 // ---------------------------------------------------------------------------
+// Recover the original report blocks from a posted review message — used when
+// reportCache is empty (after a redeploy, or when a review post wasn't made by
+// this bot process). Returns null if the message doesn't carry the approval
+// block_id we put on it.
+// ---------------------------------------------------------------------------
+function extractReportBlocksFromMessage(messageBlocks) {
+  if (!Array.isArray(messageBlocks)) return null;
+  const idx = messageBlocks.findIndex(b => b.block_id === 'report_approval');
+  if (idx === -1) return null;
+  // postBlocksForReview appends [divider, "Review…" section, actions block],
+  // so the report content is everything up to (but not including) those three.
+  return messageBlocks.slice(0, Math.max(0, idx - 2));
+}
+
+// ---------------------------------------------------------------------------
 // Post already-built report blocks to review channel (with Approve / Decline)
 // ---------------------------------------------------------------------------
 async function postBlocksForReview(client, channelId, reportBlocks, weekStart, weekEnd) {
@@ -415,9 +430,10 @@ app.action('approve_report', async ({ body, ack, client }) => {
     blocks: [txt('✅ *Approved.* Sending to the client channel…')],
   });
 
-  const reportBlocks = reportCache.get(messageTs);
-  if (!reportBlocks) {
-    await client.chat.postMessage({ channel: channelId, text: '⚠️ Could not find cached report. Please re-run the report.' });
+  const reportBlocks = reportCache.get(messageTs)
+    || extractReportBlocksFromMessage(body.message?.blocks);
+  if (!reportBlocks || reportBlocks.length === 0) {
+    await client.chat.postMessage({ channel: channelId, text: '⚠️ Could not recover report blocks (cache miss + message had no recoverable blocks). Please re-run the report.' });
     return;
   }
 
