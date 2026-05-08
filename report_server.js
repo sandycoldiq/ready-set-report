@@ -206,8 +206,13 @@ function buildReportBlocks(instantlyGroups, lemlistGroups, weekStart, weekEnd, i
     for (const g of instantlyGroups) {
       const regions       = [...g.regions].sort().join(' + ') || '—';
       const industryWord  = g.industries.length === 1 ? 'industry' : 'industries';
-      blocks.push(txt(`💡 *${g.label}*\n${g.count} campaigns × ${g.industries.length} ${industryWord} (${regions})`));
-      blocks.push(txt(g.industries.map(i => `• ${i}`).join('\n')));
+      const industryFrag  = g.industries.length
+        ? ` × ${g.industries.length} ${industryWord}`
+        : ' · industries: untagged';
+      blocks.push(txt(`💡 *${g.label}*\n${g.count} campaigns${industryFrag} (${regions})`));
+      if (g.industries.length) {
+        blocks.push(txt(g.industries.map(i => `• ${i}`).join('\n')));
+      }
       blocks.push(statsTable([
         ['Unique people contacted',   n(g.newLeads)],
         ['Total emails sent',         n(g.emailsSent)],
