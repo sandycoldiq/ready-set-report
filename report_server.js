@@ -108,20 +108,68 @@ async function getLemlistLeadStates(campaignId, headers) {
 // ---------------------------------------------------------------------------
 // Campaign parsing & grouping
 // ---------------------------------------------------------------------------
+
+// Map a campaign name to one of the GTM team's "angle" buckets. CDA / Non-CDA
+// is preserved on Meta Ads and ICP Refresh; [A]/[B] copy variants on Hiring
+// Signal are merged. Returns null for unrecognized names so the parser can
+// fall back to its old idea-based grouping.
+function classifyAngle(rawName) {
+  const name      = rawName.replace(/^\d+\.\s*/, '').trim();
+  const isNonCda  = /\[Non-CDA\]/i.test(name);
+  const isCda     = /\[CDA\]/i.test(name) && !isNonCda;
+
+  if (/^Hiring Signal\b/i.test(name)) return 'Hiring Signal';
+  if (/^Meta Ads\b/i.test(name)) {
+    if (isNonCda) return 'Meta Ads [Non-CDA]';
+    if (isCda)    return 'Meta Ads [CDA]';
+  }
+  if (/^ICP Refresh\b/i.test(name)) {
+    if (isNonCda) return 'ICP Refresh - E-commerce/Retail [Non-CDA]';
+    if (isCda)    return 'ICP Refresh - E-commerce/Retail [CDA]';
+  }
+  return null;
+}
+
+// Normalize industry labels so the same vertical reads the same across angles
+// (Hiring Signal uses "Ecommerce/Retail", ICP Refresh uses "Ecom/Retail").
+function normalizeIndustry(ind) {
+  if (!ind) return ind;
+  if (/^ecom(merce)?\/retail$/i.test(ind)) return 'E-commerce/Retail';
+  return ind;
+}
+
 function parseInstantlyName(raw) {
-  const name     = raw.replace(/^\d+\.\s*/, '').trim();
-  const pipeIdx  = name.indexOf(' | ');
-  const left     = pipeIdx !== -1 ? name.slice(0, pipeIdx).trim() : name;
-  const right    = pipeIdx !== -1 ? name.slice(pipeIdx + 3).trim() : null;
+  // Strip leading "12. " number prefix and trailing "- Sam" / "- Mike" sender suffix
+  let name = raw.replace(/^\d+\.\s*/, '').trim();
+  const senderMatch = name.match(/\s+-\s+([A-Z][a-z]+)\s*$/);
+  const sender      = senderMatch ? senderMatch[1] : null;
+  if (sender) name = name.slice(0, name.length - senderMatch[0].length).trim();
+
+  // Idea / industry separator: prefer " | ", fall back to " - "
+  let sepIdx = name.indexOf(' | ');
+  let sepLen = 3;
+  if (sepIdx === -1) {
+    sepIdx = name.indexOf(' - ');
+    sepLen = 3;
+  }
+  const left  = sepIdx !== -1 ? name.slice(0, sepIdx).trim() : name;
+  const right = sepIdx !== -1 ? name.slice(sepIdx + sepLen).trim() : null;
+
+  // Pull a [VARIANT] tag off the idea side (e.g. Hiring Signal [A])
   const varMatch = left.match(/^(.*?)\s*\[([A-Z0-9]+)\]\s*$/);
   const idea     = varMatch ? varMatch[1].trim() : left;
   const variant  = varMatch ? varMatch[2] : null;
-  let industry   = right, region = null;
+
+  // Pull a [REGION] tag off the end of the industry side, then strip
+  // [CDA]/[Non-CDA]/other bracketed tags so the industry label reads cleanly.
+  let industry = right, region = null;
   if (right) {
     const regMatch = right.match(/^(.*?)\s*\[([A-Z]{2,3})\]\s*$/);
     if (regMatch) { industry = regMatch[1].trim(); region = regMatch[2]; }
+    industry = normalizeIndustry(industry.replace(/\s*\[[^\]]+\]\s*/g, ' ').replace(/\s+/g, ' ').trim());
   }
-  return { idea, variant, industry, region };
+
+  return { idea, variant, industry, region, sender, angleKey: classifyAngle(raw) };
 }
 
 function parseLemlistIdea(name) {
@@ -133,7 +181,8 @@ function groupInstantly(campaigns) {
   const map = new Map();
   for (const c of campaigns) {
     const p   = parseInstantlyName(c.campaign_name || '');
-    const key = p.variant ? `${p.idea} [${p.variant}]` : p.idea;
+    // Prefer the angle bucket; fall back to idea+variant for unrecognized names.
+    const key = p.angleKey || (p.variant ? `${p.idea} [${p.variant}]` : p.idea);
     if (!map.has(key)) map.set(key, { label: key, idea: p.idea, variant: p.variant, industries: [], regions: new Set(), count: 0, newLeads: 0, emailsSent: 0, replies: 0, ooo: 0, interested: 0 });
     const g = map.get(key);
     if (p.industry && !g.industries.includes(p.industry)) g.industries.push(p.industry);
