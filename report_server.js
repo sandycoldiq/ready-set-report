@@ -67,9 +67,9 @@ async function resolveLemlistUserId(allCampaigns, targetEmail, headers) {
 
 async function getLemlistData(weekStart, weekEnd) {
   const creds   = Buffer.from(`:${LEMLIST_API_KEY}`).toString('base64');
-  const headers = { Authorization: `Basic ${creds}` };
-  const startIso = `${weekStart}T00:00:00.000Z`;
-  const endIso   = `${weekEnd}T23:59:59.999Z`;
+  const headers = { Authorization: `Basic ${creds}`, 'User-Agent': 'Mozilla/5.0' };
+  const startMs = Date.parse(`${weekStart}T00:00:00.000Z`);
+  const endMs   = Date.parse(`${weekEnd}T23:59:59.999Z`);
 
   const allCampaigns = await (await fetch('https://api.lemlist.com/api/campaigns', { headers })).json();
 
@@ -82,27 +82,34 @@ async function getLemlistData(weekStart, weekEnd) {
 
   const results = [];
   for (const c of campaigns) {
-    const r          = await fetch(`https://api.lemlist.com/api/campaigns/${c._id}/stats?startDate=${encodeURIComponent(startIso)}&endDate=${encodeURIComponent(endIso)}`, { headers });
-    const stats      = await r.json();
-    const leadStates = await getLemlistLeadStates(c._id, headers);
-    results.push({ campaign: c, stats, leadStates });
+    const activities = await getLemlistWindowActivities(c._id, headers, startMs, endMs);
+    results.push({ campaign: c, activities });
   }
   return results;
 }
 
-// Paginate all leads for a campaign and return state → count map
-async function getLemlistLeadStates(campaignId, headers) {
-  const counts = {};
-  let offset = 0;
+// Paginate a campaign's activity feed (newest-first) and return only the events
+// inside the reporting window. Stops early once it pages past the window start.
+// This is PERIOD-ACCURATE — unlike /leads state counts (all-time cumulative) and
+// /stats repliedCount (which is 0 for LinkedIn campaigns).
+async function getLemlistWindowActivities(campaignId, headers, startMs, endMs) {
+  const out = [];
+  let offset = 0, pagedBeforeWindow = false;
   while (true) {
-    const r     = await fetch(`https://api.lemlist.com/api/campaigns/${campaignId}/leads?limit=100&offset=${offset}`, { headers });
-    const leads = await r.json();
-    if (!Array.isArray(leads) || leads.length === 0) break;
-    for (const l of leads) counts[l.state] = (counts[l.state] || 0) + 1;
-    offset += leads.length;
-    if (leads.length < 100) break;
+    const r     = await fetch(`https://api.lemlist.com/api/activities?campaignId=${campaignId}&limit=100&offset=${offset}`, { headers });
+    const page  = await r.json();
+    const items = Array.isArray(page) ? page : (page.activities || []);
+    if (items.length === 0) break;
+    for (const a of items) {
+      const t = Date.parse(a.createdAt);
+      if (t >= startMs && t <= endMs) out.push(a);
+      else if (t < startMs) pagedBeforeWindow = true;
+    }
+    offset += items.length;
+    if (items.length < 100 || pagedBeforeWindow) break;
+    if (offset > 30000) break; // safety
   }
-  return counts;
+  return out;
 }
 
 // ---------------------------------------------------------------------------
@@ -221,36 +228,52 @@ function groupInstantly(campaigns) {
 // table (so the client can compare each named offer / re-engagement angle).
 const PER_CAMPAIGN_BUCKETS = new Set(['4 CTA Test', 'Re-engagement']);
 
-// States that indicate a LinkedIn DM was sent (paid credit used)
-const MESSAGED_STATES  = new Set(['linkedinSent', 'linkedinReplied', 'linkedinInterested']);
-// States that indicate a connection request was sent (free)
-const INVITED_STATES   = new Set(['linkedinInviteDone', 'linkedinInviteAccepted', 'linkedinSent', 'linkedinReplied', 'linkedinInterested']);
-// States that indicate the connection request was accepted
-const ACCEPTED_STATES  = new Set(['linkedinInviteAccepted', 'linkedinSent', 'linkedinReplied', 'linkedinInterested']);
-
+// LinkedIn metrics are counted as DISTINCT LEADS per activity type within the
+// reporting window. A linkedinInterested lead has also replied, so it counts
+// toward replies (positive reply) as well as the interested/hand-raiser tally.
+// We also collect reply/hand-raiser lead details (name + company) for the
+// end-of-report table.
 function groupLemlist(campaigns) {
   const map = new Map();
-  for (const { campaign: c, stats: s, leadStates: ls = {} } of campaigns) {
+  for (const { campaign: c, activities = [] } of campaigns) {
     const key = parseLemlistIdea(c.name || '');
-    if (!map.has(key)) map.set(key, { label: key, subCampaigns: [], count: 0, periodSent: 0, messaged: 0, invited: 0, accepted: 0, replies: 0, interested: 0 });
+    if (!map.has(key)) map.set(key, { label: key, subCampaigns: [], count: 0,
+      _contacted: new Set(), _invited: new Set(), _accepted: new Set(), _replied: new Set(), _interested: new Set() });
     const g = map.get(key);
     g.subCampaigns.push(c.name);
     g.count++;
-    g.periodSent += s.sentCount ?? 0; // date-filtered — used to decide visibility
-    for (const [state, cnt] of Object.entries(ls)) {
-      if (MESSAGED_STATES.has(state)) g.messaged  += cnt;
-      if (INVITED_STATES.has(state))  g.invited   += cnt;
-      if (ACCEPTED_STATES.has(state)) g.accepted  += cnt;
-      // Replies / interested come from lead states, NOT stats.repliedCount —
-      // the Lemlist /stats endpoint reports 0 replies for LinkedIn campaigns
-      // (those fields track email replies). linkedinInterested leads have also
-      // replied, so they count toward replies as well as interested.
-      if (state === 'linkedinReplied' || state === 'linkedinInterested') g.replies += cnt;
-      if (state === 'linkedinInterested') g.interested += cnt;
+    for (const a of activities) {
+      if (a.type === 'linkedinSent')           g._contacted.add(a.leadId);
+      if (a.type === 'linkedinInviteDone')     g._invited.add(a.leadId);
+      if (a.type === 'linkedinInviteAccepted') g._accepted.add(a.leadId);
+      if (a.type === 'linkedinReplied' || a.type === 'linkedinInterested') g._replied.add(a.leadId);
+      if (a.type === 'linkedinInterested')     g._interested.add(a.leadId);
     }
   }
-  // Only show groups that had actual activity in the reporting period
-  return [...map.values()].filter(g => g.periodSent > 0 || g.replies > 0);
+  // Materialize distinct-lead counts; only show groups with activity in the window.
+  return [...map.values()].map(g => ({
+    label: g.label, subCampaigns: g.subCampaigns, count: g.count,
+    messaged: g._contacted.size, invited: g._invited.size, accepted: g._accepted.size,
+    replies: g._replied.size, interested: g._interested.size,
+  })).filter(g => g.messaged > 0 || g.invited > 0 || g.replies > 0);
+}
+
+// Collect distinct LinkedIn responders (name + company + whether they're a
+// hand-raiser) from the windowed activities, for the end-of-report table.
+function collectLemlistResponders(campaigns) {
+  const byLead = new Map();
+  for (const { activities = [] } of campaigns) {
+    for (const a of activities) {
+      if (a.type !== 'linkedinReplied' && a.type !== 'linkedinInterested') continue;
+      const cur = byLead.get(a.leadId) || {
+        name: `${a.leadFirstName || ''} ${a.leadLastName || ''}`.trim() || '(unknown)',
+        company: a.leadCompanyName || '—', channel: 'LinkedIn', handRaiser: false,
+      };
+      if (a.type === 'linkedinInterested') cur.handRaiser = true;
+      byLead.set(a.leadId, cur);
+    }
+  }
+  return [...byLead.values()];
 }
 
 // ---------------------------------------------------------------------------
@@ -266,7 +289,53 @@ function statsTable(rows) {
   return { type: 'section', text: { type: 'mrkdwn', text: '```\n' + lines.join('\n') + '\n```' } };
 }
 
-function buildReportBlocks(instantlyGroups, lemlistGroups, weekStart, weekEnd, instantlyError, lemlistError) {
+// Auto-reply / autoresponder detector. Used only to decide WHO to list in the
+// responder table (the per-campaign reply_count from analytics stays the source
+// of truth for the numeric totals). Best-effort — see project reference.
+const AUTO_REPLY_RE = /automatic reply|automatisch antwoord|auto-?reply|out of office|annual leave|on leave|vacation|réponse automatique|away from|no longer with|has left|out of the office|maternity|paternity|will be back|i am out|i'm out|ooo\b|left the company|currently out|away on|received your (email|message|request)|service team received|security settings|ticket|do not reply|automated response/i;
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+// Genuine (non-auto) email repliers in the window, deduped by lead → table rows.
+async function getInstantlyEmailReplies(weekStart, weekEnd) {
+  const headers = { Authorization: `Bearer ${INSTANTLY_API_KEY}`, 'User-Agent': 'Mozilla/5.0' };
+  const startMs = Date.parse(`${weekStart}T00:00:00.000Z`);
+  const endMs   = Date.parse(`${weekEnd}T23:59:59.999Z`);
+  const get = async (u) => { for (let i = 0; i < 6; i++) { const r = await fetch(u, { headers }); if (r.status === 429) { await sleep(2000 * (i + 1)); continue; } return r.json(); } return { items: [] }; };
+  let after = null; const win = [];
+  for (let p = 0; p < 60; p++) {
+    const j = await get(`https://api.instantly.ai/api/v2/emails?limit=100&email_type=received` + (after ? `&starting_after=${after}` : ''));
+    const items = j.items || [];
+    if (!items.length) break;
+    let oldest = Infinity;
+    for (const e of items) { const t = Date.parse(e.timestamp_email); oldest = Math.min(oldest, t); if (t >= startMs && t <= endMs) win.push(e); }
+    after = j.next_starting_after;
+    await sleep(400);
+    if (oldest < startMs || !after) break;
+  }
+  const byLead = new Map();
+  for (const e of win) {
+    const sub = e.subject || '', body = (e.body?.text || '').slice(0, 600);
+    if (AUTO_REPLY_RE.test(sub) || AUTO_REPLY_RE.test(body)) continue;
+    if (byLead.has(e.lead)) continue;
+    const name = (Array.isArray(e.from_address_json) ? e.from_address_json[0]?.name : '') || (e.lead || '');
+    byLead.set(e.lead, { name, company: (e.lead || '').split('@')[1] || '—', channel: 'Email', handRaiser: false });
+  }
+  return [...byLead.values()];
+}
+
+// Render the end-of-report "Replies & Hand-raisers" table.
+function buildResponderTable(responders) {
+  const clip = (s, w) => { s = s || ''; return s.length > w ? s.slice(0, w - 1) + '…' : s; };
+  const rows = [...responders]
+    .sort((a, b) => (b.handRaiser - a.handRaiser) || a.channel.localeCompare(b.channel) || a.name.localeCompare(b.name))
+    .map(r => [clip(r.name, 22), clip(r.company, 26), r.channel, r.handRaiser ? 'Hand-raiser' : 'Reply']);
+  const head = ['Name', 'Company', 'Channel', 'Type'];
+  const w = [0, 1, 2, 3].map(i => Math.max(head[i].length, ...rows.map(r => r[i].length)));
+  const line = cols => cols.map((c, i) => String(c).padEnd(w[i])).join('  ');
+  return '```\n' + line(head) + '\n' + w.map(x => '-'.repeat(x)).join('  ') + '\n' + rows.map(line).join('\n') + '\n```';
+}
+
+function buildReportBlocks(instantlyGroups, lemlistGroups, weekStart, weekEnd, instantlyError, lemlistError, responders = []) {
   const blocks = [];
 
   blocks.push({ type: 'header', text: { type: 'plain_text', text: '📊 Ready Set | Weekly GTM Report', emoji: true } });
@@ -363,6 +432,13 @@ function buildReportBlocks(instantlyGroups, lemlistGroups, weekStart, weekEnd, i
     }
   }
 
+  // Replies & hand-raisers table (who replied this week, across both channels)
+  if (responders && responders.length) {
+    const hr = responders.filter(r => r.handRaiser).length;
+    blocks.push({ type: 'divider' });
+    blocks.push(txt(`*🙋 Replies & Hand-raisers* — ${responders.length} people (${hr} hand-raiser${hr === 1 ? '' : 's'})\n${buildResponderTable(responders)}`));
+  }
+
   blocks.push({ type: 'divider' });
   blocks.push({ type: 'context', elements: [{ type: 'mrkdwn', text: `Report covers ${weekStart} to ${weekEnd}  ·  Powered by ColdIQ` }] });
 
@@ -400,7 +476,12 @@ async function generateReport() {
   const instantlyGroups = groupInstantly(emailCampaigns);
   const lemlistGroups   = groupLemlist(lemlistFiltered);
 
-  const reportBlocks = buildReportBlocks(instantlyGroups, lemlistGroups, weekStart, weekEnd, instantlyError, lemlistError);
+  // Who replied this week (LinkedIn from activities + non-auto email replies).
+  const linkedinResponders = lemlistError ? [] : collectLemlistResponders(lemlistFiltered);
+  const emailResponders    = await getInstantlyEmailReplies(weekStart, weekEnd).catch(e => { console.error('Email replies:', e.message); return []; });
+  const responders = [...linkedinResponders, ...emailResponders];
+
+  const reportBlocks = buildReportBlocks(instantlyGroups, lemlistGroups, weekStart, weekEnd, instantlyError, lemlistError, responders);
   return { reportBlocks, weekStart, weekEnd };
 }
 
