@@ -118,6 +118,15 @@ function classifyAngle(rawName) {
   const isNonCda  = /\[Non-CDA\]/i.test(name);
   const isCda     = /\[CDA\]/i.test(name) && !isNonCda;
 
+  // Re-engagement campaigns (re-contacting leads we've already reached) — must be
+  // checked BEFORE the CTA-test branch because their names carry the same offer
+  // keywords (e.g. "Hero Ad Risk Score (Reengagement)").
+  if (/re-?engagement/i.test(name)) return 'Re-engagement';
+
+  // The four named-offer CTA-test campaigns — grouped into one bucket that breaks
+  // out per-campaign stats in the report.
+  if (/Hero Ad Risk Score|Performance Creative System|Maturity Assessment|Iteration Engine|Growth Lag|Tax Audit/i.test(name)) return '4 CTA Test';
+
   if (/^Hiring Signal\b/i.test(name)) return 'Hiring Signal';
   if (/^Meta Ads\b/i.test(name)) {
     if (isNonCda) return 'Meta Ads [Non-CDA]';
@@ -183,19 +192,34 @@ function groupInstantly(campaigns) {
     const p   = parseInstantlyName(c.campaign_name || '');
     // Prefer the angle bucket; fall back to idea+variant for unrecognized names.
     const key = p.angleKey || (p.variant ? `${p.idea} [${p.variant}]` : p.idea);
-    if (!map.has(key)) map.set(key, { label: key, idea: p.idea, variant: p.variant, industries: [], regions: new Set(), count: 0, newLeads: 0, emailsSent: 0, replies: 0, ooo: 0, interested: 0 });
+    if (!map.has(key)) map.set(key, { label: key, idea: p.idea, variant: p.variant, industries: [], regions: new Set(), members: [], count: 0, newLeads: 0, emailsSent: 0, replies: 0, ooo: 0, interested: 0 });
     const g = map.get(key);
     if (p.industry && !g.industries.includes(p.industry)) g.industries.push(p.industry);
     if (p.region) g.regions.add(p.region);
     g.count++;
-    g.newLeads   += c.new_leads_contacted_count ?? 0;
-    g.emailsSent += c.emails_sent_count         ?? 0;
-    g.replies    += c.reply_count               ?? 0;
-    g.ooo        += c.reply_count_automatic     ?? 0;
-    g.interested += c.total_opportunities       ?? 0;
+    const member = {
+      name:       (c.campaign_name || '').replace(/^\d+\.\s*/, '').trim(),
+      newLeads:   c.new_leads_contacted_count ?? 0,
+      emailsSent: c.emails_sent_count         ?? 0,
+      replies:    c.reply_count               ?? 0,
+      ooo:        c.reply_count_automatic     ?? 0,
+      interested: c.total_opportunities       ?? 0,
+    };
+    g.members.push(member);
+    g.newLeads   += member.newLeads;
+    g.emailsSent += member.emailsSent;
+    g.replies    += member.replies;
+    g.ooo        += member.ooo;
+    g.interested += member.interested;
   }
-  return [...map.values()];
+  // Order: GTM angles first, then the 4 CTA Test bucket, then Re-engagement.
+  const RANK = { '4 CTA Test': 100, 'Re-engagement': 200 };
+  return [...map.values()].sort((a, b) => (RANK[a.label] || 0) - (RANK[b.label] || 0));
 }
+
+// Buckets that render one stats table per campaign instead of a single combined
+// table (so the client can compare each named offer / re-engagement angle).
+const PER_CAMPAIGN_BUCKETS = new Set(['4 CTA Test', 'Re-engagement']);
 
 // States that indicate a LinkedIn DM was sent (paid credit used)
 const MESSAGED_STATES  = new Set(['linkedinSent', 'linkedinReplied', 'linkedinInterested']);
@@ -253,22 +277,31 @@ function buildReportBlocks(instantlyGroups, lemlistGroups, weekStart, weekEnd, i
     blocks.push(txt('_No active email campaigns found for this period._'));
   } else {
     for (const g of instantlyGroups) {
-      const regions       = [...g.regions].sort().join(' + ') || '—';
-      const industryWord  = g.industries.length === 1 ? 'industry' : 'industries';
-      const industryFrag  = g.industries.length
-        ? ` × ${g.industries.length} ${industryWord}`
-        : ' · industries: untagged';
-      blocks.push(txt(`💡 *${g.label}*\n${g.count} campaigns${industryFrag} (${regions})`));
-      if (g.industries.length) {
-        blocks.push(txt(g.industries.map(i => `• ${i}`).join('\n')));
+      blocks.push(txt(`💡 *${g.label}*`));
+      if (g.label === 'Re-engagement') {
+        blocks.push(txt('_Re-contacting leads we have already reached on earlier campaigns._'));
       }
-      blocks.push(statsTable([
-        ['Unique people contacted',   n(g.newLeads)],
-        ['Total emails sent',         n(g.emailsSent)],
-        ['Replies',                   n(g.replies)],
-        ['Auto replies',              n(g.ooo)],
-        ['Interested / hand-raisers', g.interested > 0 ? n(g.interested) : '—'],
-      ]));
+      if (PER_CAMPAIGN_BUCKETS.has(g.label)) {
+        // One stats table per campaign so each offer can be compared directly.
+        for (const m of g.members) {
+          blocks.push(txt(`• *${m.name}*`));
+          blocks.push(statsTable([
+            ['Unique people contacted',   n(m.newLeads)],
+            ['Total emails sent',         n(m.emailsSent)],
+            ['Replies',                   n(m.replies)],
+            ['Auto replies',              n(m.ooo)],
+            ['Interested / hand-raisers', m.interested > 0 ? n(m.interested) : '—'],
+          ]));
+        }
+      } else {
+        blocks.push(statsTable([
+          ['Unique people contacted',   n(g.newLeads)],
+          ['Total emails sent',         n(g.emailsSent)],
+          ['Replies',                   n(g.replies)],
+          ['Auto replies',              n(g.ooo)],
+          ['Interested / hand-raisers', g.interested > 0 ? n(g.interested) : '—'],
+        ]));
+      }
     }
 
     if (instantlyGroups.length > 1) {
