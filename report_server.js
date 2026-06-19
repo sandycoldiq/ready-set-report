@@ -241,9 +241,13 @@ function groupLemlist(campaigns) {
       if (MESSAGED_STATES.has(state)) g.messaged  += cnt;
       if (INVITED_STATES.has(state))  g.invited   += cnt;
       if (ACCEPTED_STATES.has(state)) g.accepted  += cnt;
+      // Replies / interested come from lead states, NOT stats.repliedCount —
+      // the Lemlist /stats endpoint reports 0 replies for LinkedIn campaigns
+      // (those fields track email replies). linkedinInterested leads have also
+      // replied, so they count toward replies as well as interested.
+      if (state === 'linkedinReplied' || state === 'linkedinInterested') g.replies += cnt;
+      if (state === 'linkedinInterested') g.interested += cnt;
     }
-    g.replies    += s.repliedCount    ?? 0;
-    g.interested += s.interestedCount ?? 0;
   }
   // Only show groups that had actual activity in the reporting period
   return [...map.values()].filter(g => g.periodSent > 0 || g.replies > 0);
